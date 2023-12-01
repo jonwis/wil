@@ -22,6 +22,9 @@
 #if __has_include(<type_traits>)
 #include <type_traits>
 #endif
+#if _HAS_CXX17 && __has_include(<string_view>)
+#include <string_view>
+#endif
 
 // Forward declaration within WIL (see https://msdn.microsoft.com/en-us/library/br244983.aspx)
 /// @cond
@@ -3002,6 +3005,78 @@ namespace wil
 
 #endif // __IObjectWithSite_INTERFACE_DEFINED__
 
+
+#if !defined(WI_GUID_LENGTH_SPECIFIED)
+#define WI_GUID_LENGTH_SPECIFIED
+    //! For {guid} string form. Includes space for the null terminator.
+    constexpr size_t guid_string_buffer_length = 39;
+
+    //! For {guid} string form. Not including the null terminator.
+    constexpr size_t guid_string_length = 38;
+#endif
+
+    enum class guid_format
+    {
+        braced,
+        unbraced
+    };
+
+    struct guid_string
+    {
+
+        explicit guid_string(GUID const& guid, guid_format format = guid_format::braced) noexcept
+        {
+            (void)StringFromGUID2(guid, value, ARRAYSIZE(value));
+
+            if (format == guid_format::unbraced)
+            {
+                memmove(value, value + 1, (guid_string_length - 2) * sizeof(wchar_t));
+                value[guid_string_length - 2] = 0;
+            }
+        }
+
+        constexpr guid_string() noexcept = default;
+        constexpr guid_string(guid_string const&) = default;
+        constexpr guid_string(guid_string&&) = default;
+        constexpr guid_string& operator=(guid_string const&) = default;
+        constexpr guid_string& operator=(guid_string&&) = default;
+
+#if _HAS_CXX17 && __has_include(<string_view>)
+        constexpr operator std::wstring_view() const noexcept
+        {
+            return { value, size() };
+        }
+#endif
+
+        constexpr const wchar_t* c_str() const noexcept
+        {
+            return value;
+        }
+
+        constexpr size_t size() const noexcept
+        {
+            if (value[0] == 0)
+            {
+                return 0;
+            }
+            else if (value[0] == '{')
+            {
+                return guid_string_length;
+            }
+            else
+            {
+                return guid_string_length - 2;
+            }
+        }
+
+    private:
+        wchar_t value[guid_string_buffer_length]{};
+    };
+
+    inline auto to_wstring(GUID const& guid, guid_format format = guid_format::braced) noexcept
+    {
+        return guid_string{ guid, format };
+    }
 } // wil
 
 #endif

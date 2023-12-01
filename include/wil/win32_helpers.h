@@ -146,11 +146,14 @@ namespace wil
     //! It will be 25 when there are more than 9 disks.
     constexpr size_t max_extended_path_length = 0x7FFF - 24;
 
+#if !defined(WI_GUID_LENGTH_SPECIFIED)
+#define WI_GUID_LENGTH_SPECIFIED
     //! For {guid} string form. Includes space for the null terminator.
     constexpr size_t guid_string_buffer_length = 39;
 
     //! For {guid} string form. Not including the null terminator.
     constexpr size_t guid_string_length = 38;
+#endif
 
 #pragma region String and identifier comparisons
     // Using CompareStringOrdinal functions:

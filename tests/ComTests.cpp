@@ -2820,3 +2820,33 @@ TEST_CASE("StreamTests::Saver", "[com][IStream]")
     }
 }
 #endif
+
+
+TEST_CASE("Guid::ToString", "[com][guid][tostring]")
+{
+    auto braced = wil::guid_string{ GUID_NULL };
+    auto unbraced = wil::guid_string{ GUID_NULL, wil::guid_format::unbraced };
+
+    REQUIRE(_wcsicmp(braced.c_str(), L"{00000000-0000-0000-0000-000000000000}") == 0);
+    REQUIRE(wcslen(braced.c_str()) == 38);
+    REQUIRE(_wcsicmp(unbraced.c_str(), L"00000000-0000-0000-0000-000000000000") == 0);
+    REQUIRE(wcslen(unbraced.c_str()) == 36);
+
+    braced = wil::guid_string{ __uuidof(IStream) };
+    unbraced = wil::guid_string{ __uuidof(IStream), wil::guid_format::unbraced };
+    REQUIRE(_wcsicmp(braced.c_str(), L"{0000000c-0000-0000-c000-000000000046}") == 0);
+    REQUIRE(wcslen(braced.c_str()) == 38);
+    REQUIRE(_wcsicmp(unbraced.c_str(), L"0000000c-0000-0000-c000-000000000046") == 0);
+    REQUIRE(wcslen(unbraced.c_str()) == 36);
+
+    braced = wil::guid_string{ __uuidof(ShellLink) };
+    unbraced = wil::guid_string{ __uuidof(ShellLink), wil::guid_format::unbraced };
+    REQUIRE(_wcsicmp(braced.c_str(), L"{00021401-0000-0000-c000-000000000046}") == 0);
+    REQUIRE(wcslen(braced.c_str()) == 38);
+    REQUIRE(_wcsicmp(unbraced.c_str(), L"00021401-0000-0000-c000-000000000046") == 0);
+    REQUIRE(wcslen(unbraced.c_str()) == 36);
+
+#ifdef WIL_ENABLE_EXCEPTIONS
+    std::wstring value2{ wil::guid_string(GUID_NULL) };
+#endif
+}
