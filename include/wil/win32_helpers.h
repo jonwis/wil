@@ -651,27 +651,42 @@ namespace wil
 
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
 
-    // Lookup a DWORD value under HKLM\...\Image File Execution Options\<current process name>
-    inline DWORD GetCurrentProcessExecutionOption(PCWSTR valueName, DWORD defaultValue = 0)
+    // Lookup a DWORD value under HKLM\...\Image File Execution Options\<executableName>
+    template<typename T = DWORD, typename = wistd::enable_if_t<wistd::is_same_v<T, DWORD> || wistd::is_same_v<T, ULONG64>>> T GetProcessExecutionOption(PCWSTR executableName, PCWSTR valueName, T defaultValue = 0)
     {
-        auto filePath = wil::GetModuleFileNameW<wil::unique_cotaskmem_string>();
-        if (auto lastSlash = wcsrchr(filePath.get(), L'\\'))
+        auto keyPath = wil::str_concat<wil::unique_cotaskmem_string>(LR"(SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\)",
+            executableName);
+
+        if (keyPath)
         {
-            const auto fileName = lastSlash + 1;
-            auto keyPath = wil::str_concat<wil::unique_cotaskmem_string>(LR"(SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\)",
-                fileName);
-            DWORD value{}, sizeofValue = sizeof(value);
+            T value{};
+            DWORD sizeofValue = sizeof(value);
+            DWORD rrfRt = wistd::is_same_v<T, uint32_t> ? RRF_RT_REG_DWORD : RRF_RT_REG_QWORD;
             if (::RegGetValueW(HKEY_LOCAL_MACHINE, keyPath.get(), valueName,
 #ifdef RRF_SUBKEY_WOW6464KEY
-                RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY,
+                rrfRt | RRF_SUBKEY_WOW6464KEY,
 #else
-                RRF_RT_REG_DWORD,
+                rrfRt,
 #endif
                 nullptr, &value, &sizeofValue) == ERROR_SUCCESS)
             {
                 return value;
             }
         }
+        return defaultValue;
+    }
+
+    // Lookup a DWORD value under HKLM\...\Image File Execution Options\<current process name>
+    template<typename T = DWORD, typename = wistd::enable_if_t<wistd::is_same_v<T, DWORD> || wistd::is_same_v<T, ULONG64>>> T GetCurrentProcessExecutionOption(PCWSTR valueName, T defaultValue = 0)
+    {
+        if (auto filePath = wil::GetModuleFileNameW<wil::unique_cotaskmem_string>())
+        {
+            if (auto lastSlash = wcsrchr(filePath.get(), L'\\'))
+            {
+                return GetProcessExecutionOption<T>(lastSlash + 1, valueName, defaultValue);
+            }
+        }
+
         return defaultValue;
     }
 

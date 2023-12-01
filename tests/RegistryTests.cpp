@@ -5195,3 +5195,52 @@ TEST_CASE("BasicRegistryTests::key_heap_string_nothrow_iterator", "[registry]]")
         REQUIRE(count == 4);
     }
 }
+
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP) && defined(WIL_ENABLE_EXCEPTIONS)
+TEST_CASE("Win32Helpers::GetProcessExecutionOption", "[win32_helpers]")
+{
+    // There's not a good way to have this test run an "as admin" setup step that would populate
+    // the registry. So instead, use the reg APIs to enumerate the key and pick an exe and a value.
+    wil::unique_hkey ifeoKey;
+    REQUIRE_SUCCEEDED(RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options", 0, KEY_READ, &ifeoKey));
+
+    // Walk the keys under the ifeoKey and find one that has a valid option name value. Stop when both
+    // are found. If neither are found, stop the test. Read the actual value and store it
+    std::wstring exeName;
+    std::wstring valueName;
+    DWORD actualValue = 0;
+
+    for (wil::reg::key_iterator it{ ifeoKey.get() }; it != wil::reg::key_iterator{}; ++it)
+    {
+        wil::unique_hkey exeIfeoKey;
+        if (SUCCEEDED(RegOpenKeyExW(ifeoKey.get(), it->name.c_str(), 0, KEY_READ, &exeIfeoKey)))
+        {
+            auto ifeoExeOption = wil::reg::value_iterator{ exeIfeoKey.get() };
+            if (ifeoExeOption != wil::reg::value_iterator{})
+            {
+                if (RegGetValueW(exeIfeoKey.get(), nullptr, ifeoExeOption->name.c_str(), RRF_RT_REG_DWORD, nullptr, &actualValue, nullptr) == ERROR_SUCCESS)
+                {
+                    exeName = it->name;
+                    valueName = ifeoExeOption->name;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (exeName.empty() && valueName.empty())
+    {
+        return;
+    }
+
+    // Use the exeName and valueName to get the value
+    REQUIRE(actualValue == wil::GetProcessExecutionOption(exeName.c_str(), valueName.c_str(), actualValue + 1));
+
+    // Get a value that does not exist
+    REQUIRE(42 == wil::GetProcessExecutionOption(exeName.c_str(), (valueName + L"_DoesNotExist").c_str(), 42ul));
+
+    // Get an exe that does not exist
+    REQUIRE(42 == wil::GetProcessExecutionOption((exeName + L"_DoesNotExist").c_str(), valueName.c_str(), 42ul));
+}
+#endif
+
