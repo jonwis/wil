@@ -14,6 +14,8 @@
 #ifndef __WIL_CPPWINRT_HELPERS_DEFINED
 #define __WIL_CPPWINRT_HELPERS_DEFINED
 
+#include "stl.h"
+
 /// @cond
 namespace wil::details
 {
@@ -352,7 +354,18 @@ auto to_vector(TSrc const& src)
 } // namespace wil
 #endif
 
-#if (defined(WINRT_Windows_UI_H) && defined(_WINDOWS_UI_INTEROP_H_) && !defined(__WIL_CPPWINRT_WINDOWS_UI_INTEROP_HELPERS)) || \
+#if !defined(__WIL_CPPWINRT_ZSTRING_VIEW_DEFINED)
+#define __WIL_CPPWINRT_ZSTRING_VIEW_DEFINED
+namespace wil
+{
+    namespace details
+    {
+        template<> struct zstring_view_source_counted<winrt::hstring> : wistd::true_type {};
+    }
+}
+#endif // __WIL_CPPWINRT_ZSTRING_VIEW_DEFINED
+
+#if defined(WINRT_Windows_UI_H) && defined(_WINDOWS_UI_INTEROP_H_) && !defined(__WIL_CPPWINRT_WINDOWS_UI_INTEROP_HELPERS) || \
     defined(WIL_DOXYGEN)
 /// @cond
 #define __WIL_CPPWINRT_WINDOWS_UI_INTEROP_HELPERS

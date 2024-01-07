@@ -133,6 +133,14 @@ inline PCWSTR str_raw_ptr(const std::wstring& str)
 }
 
 #if _HAS_CXX17
+/// @cond
+namespace details
+{
+    // Add specializations for other string types that have pointer-and-length
+    template<typename T> struct zstring_view_source_counted : wistd::false_type {};
+}
+/// @endcond
+
 /**
     zstring_view. A zstring_view is identical to a std::string_view except it is always nul-terminated (unless empty).
     * zstring_view can be used for storing string literals without "forgetting" the length or that it is nul-terminated.
@@ -158,6 +166,11 @@ public:
             WI_STL_FAIL_FAST_IF(true);
         }
     }
+
+    template<typename Q> constexpr basic_zstring_view(Q const& q, wistd::enable_if_t <
+        wistd::is_same_v < TChar, std::decay_t<decltype(Q{}.data()[0]) >> && details::zstring_view_source_counted<Q>::value,
+        int > = 0) noexcept
+        : basic_zstring_view(q.data(), q.size()) { }
 
     template <size_t stringArrayLength>
     constexpr basic_zstring_view(const TChar (&stringArray)[stringArrayLength]) noexcept :

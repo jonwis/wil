@@ -759,3 +759,10 @@ TEST_CASE("CppWinRTTests::ThrownExceptionWithMessage", "[cppwinrt]")
     }();
     witest::RequireRestrictedErrorInfo(E_INVALIDARG, L"The parameter is incorrect.\r\n");
 }
+
+TEST_CASE("CppWinRTTests::HstringAsViewSource", "[cppwinrt]")
+{
+    winrt::hstring x = L"Hello";
+    wil::zwstring_view y{ x };
+    y = x;
+}
