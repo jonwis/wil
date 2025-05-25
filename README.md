@@ -173,16 +173,16 @@ C:\wil> ctest --preset "msvc-release"
 For command-line Ninja (configured with `init.cmd -c clang -b debug`) build use, some examples:
 ```powershell
 # Build all tests
-C:\wil> ninja -C build\clang-x64-debug
+C:\wil> ninja -C build\clang64debug
 
 # Build only one test
-C:\wil> ninja -C build\clang-x64-debug witest
+C:\wil> ninja -C build\clang64debug witest
 
 # Clean outputs, then build one target
-C:\wil> ninja -C build\clang-x64-debug -j 0 clean witest.app
+C:\wil> ninja -C build\clang64debug -j 0 clean witest.app
 
 # Run the tests (PowerShell)
-C:\wil> Get-ChildItem -Recurse -File build\clang-x64-debug\witest*.exe | %{ Write-Host $_ ; & $_ }
+C:\wil> Get-ChildItem -Recurse -File build\clang64debug\witest*.exe | %{ Write-Host $_ ; & $_ }
 
 # Run the tests (cmd)
 C:\wil> for /F %f IN ('dir /s /b build\clang\tests\witest*.exe') do %f

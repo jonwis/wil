@@ -182,76 +182,6 @@ class ActivityBase;
 /// @cond
 namespace details
 {
-    // Lazy static initialization helper for holding a singleton telemetry class to maintain
-    // the provider handle.
-
-    template <class T>
-    class static_lazy
-    {
-    public:
-        void __cdecl cleanup() WI_NOEXCEPT
-        {
-            void* pVoid;
-            BOOL pending;
-
-            // If object is being constructed on another thread, wait until construction completes.
-            // Need a memory barrier here (see get() and ~Completer below) so use the result that we
-            // get from InitOnceBeginInitialize(..., &pVoid, ...)
-            if (::InitOnceBeginInitialize(&m_initOnce, INIT_ONCE_CHECK_ONLY, &pending, &pVoid) && !pending)
-            {
-                static_cast<T*>(pVoid)->~T();
-            }
-        }
-
-        T* get(void(__cdecl* cleanupFunc)(void)) WI_NOEXCEPT
-        {
-            void* pVoid{};
-            BOOL pending;
-            if (::InitOnceBeginInitialize(&m_initOnce, 0, &pending, &pVoid) && pending)
-            {
-                // Don't do anything non-trivial from DllMain, fail fast.
-                // Some 3rd party code in IE calls shell functions this way, so we can only enforce
-                // this in DEBUG.
-#ifdef DEBUG
-                FAIL_FAST_IMMEDIATE_IF_IN_LOADER_CALLOUT();
-#endif
-
-                Completer completer(this);
-                pVoid = &m_storage;
-                ::new (pVoid) T();
-                atexit(cleanupFunc); // ignore failure (that's what the C runtime does, too)
-                completer.Succeed();
-            }
-            return static_cast<T*>(pVoid);
-        }
-
-    private:
-        INIT_ONCE m_initOnce;
-        alignas(T) BYTE m_storage[sizeof(T)];
-        struct Completer
-        {
-            static_lazy* m_pSelf;
-            DWORD m_flags;
-
-            explicit Completer(static_lazy* pSelf) WI_NOEXCEPT : m_pSelf(pSelf), m_flags(INIT_ONCE_INIT_FAILED)
-            {
-            }
-            void Succeed() WI_NOEXCEPT
-            {
-                m_flags = 0;
-            }
-
-            ~Completer() WI_NOEXCEPT
-            {
-                if (m_flags == 0)
-                {
-                    reinterpret_cast<T*>(&m_pSelf->m_storage)->Create();
-                }
-                ::InitOnceComplete(&m_pSelf->m_initOnce, m_flags, &m_pSelf->m_storage);
-            }
-        };
-    };
-
     // This class serves as a simple RAII wrapper around CallContextInfo.  It presumes that
     // the contextName parameter is always a static string, but copies or allocates the
     // contextMessage as needed.
@@ -259,10 +189,8 @@ namespace details
     class StoredCallContextInfo : public wil::CallContextInfo
     {
     public:
-        StoredCallContextInfo() WI_NOEXCEPT
+        StoredCallContextInfo() : wil::CallContextInfo({})
         {
-            // Suppress '-Wnontrivial-memcall' with 'static_cast'
-            ::ZeroMemory(static_cast<void*>(this), sizeof(*this));
         }
 
         StoredCallContextInfo(StoredCallContextInfo&& other) WI_NOEXCEPT : StoredCallContextInfo()
@@ -275,10 +203,8 @@ namespace details
             contextId = other.contextId;
             contextName = other.contextName;
             ClearMessage();
-            contextMessage = other.contextMessage;
-            other.contextMessage = nullptr;
-            m_ownsMessage = other.m_ownsMessage;
-            other.m_ownsMessage = false;
+            contextMessage = wistd::exchange(other.contextMessage, nullptr);
+            m_ownsMessage = wistd::exchange(other.m_ownsMessage, false);
             return *this;
         }
 
@@ -502,9 +428,7 @@ public:
     }
 
 protected:
-    TraceLoggingProvider() WI_NOEXCEPT
-    {
-    }
+    TraceLoggingProvider() WI_NOEXCEPT = default;
 
     virtual ~TraceLoggingProvider() WI_NOEXCEPT
     {
@@ -2285,12 +2209,9 @@ private: \
 protected: \
     static TraceLoggingClassName* Instance() WI_NOEXCEPT \
     { \
-        static wil::details::static_lazy<TraceLoggingClassName> wrapper; \
-        return wrapper.get([]() { \
-            wrapper.cleanup(); \
-        }); \
-    } \
-    friend class wil::details::static_lazy<TraceLoggingClassName>;
+        static TraceLoggingClassName wrapper; \
+        return &wrapper; \
+    }
 
 #define __IMPLEMENT_TRACELOGGING_CLASS_WITH_GROUP(TraceLoggingClassName, ProviderName, ProviderId, TraceLoggingOption) \
     __IMPLEMENT_TRACELOGGING_CLASS_BASE(TraceLoggingClassName, TraceLoggingClassName) \

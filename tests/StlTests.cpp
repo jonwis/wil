@@ -1,5 +1,13 @@
 #include "pch.h"
 
+#include <wil/common.h>
+
+#if (__WI_LIBCPP_STD_VER >= 20) && WI_HAS_INCLUDE(<format>, 1) // Assume present if C++20
+#include <format>
+#endif
+
+#include <wil/stl.h>
+
 #include "common.h"
 
 // Disable tests if we're not using exceptions. This is simpler than conditionally compiling this file
@@ -150,26 +158,26 @@ TEST_CASE("StlTests::TestZStringView literal", "[stl][zstring_view]")
     }
 }
 
-#if __cpp_lib_format >= 201907L
+#if defined(__cpp_lib_format) && (__cpp_lib_format > 201907L)
 
 TEST_CASE("StlTests::TestZStringView formatting", "[stl][zstring_view]")
 {
     SECTION("zstring_view can be used with std::format(wchar_t const*)")
     {
         auto str = L"kittens"_zv;
-        auto fmtStr = std::format(L"Hello {}", str);
-        REQUIRE(fmtStr == L"Hello kittens");
+        auto f = std::format(L"Hello {}", str);
+        REQUIRE(f == L"Hello kittens");
     }
 
     SECTION("zstring_view can be used with std::format(char const*)")
     {
         auto str = "kittens"_zv;
-        auto fmtStr = std::format("Hello {}", str);
-        REQUIRE(fmtStr == "Hello kittens");
+        auto f = std::format("Hello {}", str);
+        REQUIRE(f == "Hello kittens");
     }
 }
 
-#endif
+#endif // __WI_LIBCPP_STD_VER >= 20
 
 TEST_CASE("StlTests::TestZWStringView", "[stl][zstring_view]")
 {

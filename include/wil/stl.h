@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <TraceLoggingProvider.h>
 #if (__WI_LIBCPP_STD_VER >= 17) && WI_HAS_INCLUDE(<string_view>, 1) // Assume present if C++17
 #include <string_view>
 #endif
@@ -132,6 +133,16 @@ inline PCWSTR str_raw_ptr(const std::wstring& str)
     return str.c_str();
 }
 
+inline string_view_t view_from_string(std::wstring_view const& s)
+{
+    return string_view_t{s.data(), s.length()};
+}
+
+inline string_view_t view_from_string(std::wstring const& s)
+{
+    return string_view_t{s.data(), s.length()};
+}
+
 #if __cpp_lib_string_view >= 201606L
 /**
     zstring_view. A zstring_view is identical to a std::string_view except it is always nul-terminated (unless empty).
@@ -241,6 +252,19 @@ private:
 using zstring_view = basic_zstring_view<char>;
 using zwstring_view = basic_zstring_view<wchar_t>;
 
+// str_raw_ptr is an overloaded function that retrieves a const pointer to the first character in a string's buffer.
+// This is the overload for std::wstring.  Other overloads available in resource.h.
+template <typename TChar>
+inline auto str_raw_ptr(basic_zstring_view<TChar> str)
+{
+    return str.c_str();
+}
+
+inline string_view_t view_from_string(zwstring_view const& s)
+{
+    return string_view_t{s.data(), s.length()};
+}
+
 inline namespace literals
 {
     constexpr zstring_view operator""_zv(const char* str, std::size_t len) noexcept
@@ -258,13 +282,82 @@ inline namespace literals
 
 } // namespace wil
 
-#if (__WI_LIBCPP_STD_VER >= 20) && WI_HAS_INCLUDE(<format>, 1) // Assume present if C++20
-#include <format>
+#if defined(_FORMAT_)
 template <typename TChar>
 struct std::formatter<wil::basic_zstring_view<TChar>, TChar> : std::formatter<std::basic_string_view<TChar>, TChar>
 {
 };
 #endif
+
+#if __cpp_lib_string_view >= 201606L
+
+template <typename TContainer>
+struct _tlgWrapBufferStlContainer
+{
+    static const unsigned DataDescCount = 2;
+
+    TContainer const& view;
+
+    __forceinline explicit _tlgWrapBufferStlContainer(_In_ TContainer const& ref) : view(ref)
+    {
+    }
+
+    __forceinline void* Fill(_Out_writes_(DataDescCount) EVENT_DATA_DESCRIPTOR* pDesc) const
+    {
+        EventDataDescCreate(&pDesc[0], &pDesc[1].Size, 2);
+        EventDataDescCreate(&pDesc[1], view.data(), static_cast<UINT16>(view.size() * sizeof(*view.data())));
+        return pDesc;
+    }
+};
+
+template <typename TChar>
+struct _tlgTypeMapStlString
+{
+    typedef UINT8 _tlgTypeType0;
+    typedef UINT16 _tlgTypeType1;
+    static bool const _tlgIsSimple = false;
+    static TlgIn_t const _tlgViewIn = wistd::is_same_v<TChar, char> ? TlgInCOUNTEDANSISTRING : TlgInCOUNTEDSTRING;
+    static _tlgTypeType0 const _tlgType0 = _tlgViewIn | 0x0000;
+    static _tlgTypeType1 const _tlgType1 = _tlgViewIn | 0x8080;
+};
+
+template <typename TChar, typename TTraits>
+struct _tlgTypeMapBase<std::basic_string_view<TChar, TTraits>> : _tlgTypeMapStlString<TChar>
+{
+};
+
+template <typename TChar, typename TTraits>
+TLG_INLINE auto _tlg_CALL _tlgWrapAuto(std::basic_string_view<TChar, TTraits> const& value)
+{
+    return _tlgWrapBufferStlContainer<std::basic_string_view<TChar, TTraits>>(value);
+}
+
+template <typename TChar, typename TTraits>
+struct _tlgTypeMapBase<std::basic_string<TChar, TTraits>> : _tlgTypeMapStlString<TChar>
+{
+};
+
+template <typename TChar, typename TTraits>
+TLG_INLINE auto _tlg_CALL _tlgWrapAuto(std::basic_string<TChar, TTraits> const& value)
+{
+    return _tlgWrapBufferStlContainer<std::basic_string<TChar, TTraits>>(value);
+}
+
+template <typename TChar>
+struct _tlgTypeMapBase<wil::basic_zstring_view<TChar>> : _tlgTypeMapStlString<TChar>
+{
+};
+
+template <typename TChar>
+TLG_INLINE auto _tlg_CALL _tlgWrapAuto(wil::basic_zstring_view<TChar> const& value)
+{
+    return _tlgWrapBufferStlContainer<wil::basic_zstring_view<TChar>>(value);
+}
+
+#define TraceLoggingStringView(pValue, ...) _tlgArgAuto(static_cast<std::string_view>(pValue), __VA_ARGS__)
+#define TraceLoggingWideStringView(pValue, ...) _tlgArgAuto(static_cast<std::wstring_view>(pValue), __VA_ARGS__)
+
+#endif // __cpp_lib_string_view >= 201606L
 
 #endif // WIL_ENABLE_EXCEPTIONS
 
