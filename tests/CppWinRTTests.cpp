@@ -8,6 +8,7 @@
 #endif
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.ApplicationModel.Activation.h>
+#include <winrt/Windows.Web.Http.h>
 #include <wil/cppwinrt_helpers.h>
 #include <winrt/Windows.System.h>
 #include <wil/cppwinrt_helpers.h> // Verify can include a second time to unlock more features
@@ -765,4 +766,64 @@ TEST_CASE("CppWinRTTests::ZStringViewFromHString", "[cppwinrt]")
 {
     winrt::hstring hstr = L"Hello";
     REQUIRE(wil::zwstring_view(hstr) == hstr);
+}
+
+template <typename T> struct consume_bases;
+
+template<typename D, typename... I> struct consume_bases<winrt::impl::require<D, I...>>
+{
+    using consumes = std::tuple<typename winrt::impl::consume<typename winrt::impl::default_interface<D>::type>, typename winrt::impl::consume<I>...>;
+};
+
+template <typename D, typename I, typename C>
+struct find_matching_iface;
+
+template <typename D, typename CSpec>
+struct find_matching_iface<D, CSpec, std::tuple<>>
+{
+    using type = void;
+};
+
+template<typename D, typename CSpec, typename C1, typename... C>
+struct find_matching_iface<D, CSpec, std::tuple<C1, C...>>
+{
+    template <typename C>
+    struct consume_iface;
+
+    template <typename I>
+    struct consume_iface<winrt::impl::consume<I>>
+    {
+        using iface = I;
+    };
+
+    using type = std::conditional_t<
+        std::is_same_v<CSpec, typename C1::template type<D>>,
+        typename consume_iface<C1>::iface,
+        typename find_matching_iface<D, CSpec, std::tuple<C...>>::type>;
+};
+
+template <typename D, typename R, typename I, typename... Args>
+auto try_get_interface_for(D const& d, R(I::*)(Args...) const)
+{
+    using iface_t = find_matching_iface<D, I, typename consume_bases<typename D::require>::consumes>::type;
+    static_assert(std::is_convertible_v<D, iface_t>);
+    return d.try_as<iface_t>();
+}
+
+using namespace winrt::Windows::Web::Http;
+using namespace winrt::Windows::Foundation;
+
+void muffin(HttpClient const& cl)
+{
+    if (auto i = try_get_interface_for(cl, &HttpClient::TryPostAsync))
+    {
+        i.TryPostAsync(nullptr, nullptr);
+    }
+
+    // Does not work yet; IMap<K,V> is a template
+    // winrt::Windows::Foundation::Collections::PropertySet ps;
+    // if (auto i = try_get_interface_for(ps, &winrt::Windows::Foundation::Collections::PropertySet::Lookup))
+    // {
+    //    i.Lookup();
+    // }
 }
