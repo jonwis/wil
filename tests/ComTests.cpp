@@ -3130,6 +3130,26 @@ TEST_CASE("COMEnumerator", "[com][enumerator]")
 #pragma warning(pop)
 #endif // WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 
+#if (__WI_LIBCPP_STD_VER >= 20)
+TEST_CASE("StaticBStrs", "[com][static_bstr]")
+{
+    using namespace wil;
+
+    constexpr auto bstr_1 = "SomeString"_bstr;
+    constexpr auto bstr_2 = "short"_bstr;
+
+    REQUIRE(SysStringByteLen(bstr_1) == 20);
+    REQUIRE(SysStringByteLen(bstr_2) == 10);
+    REQUIRE(SysStringByteLen("more"_bstr) == 8);
+    REQUIRE(SysStringLen(bstr_1) == 10);
+    REQUIRE(SysStringLen(bstr_2) == 5);
+    REQUIRE(SysStringLen("more"_bstr) == 4);
+    REQUIRE(0 == wcscmp(bstr_1, L"SomeString"));
+    REQUIRE(0 == wcscmp(bstr_2, L"short"));
+    REQUIRE(0 == wcscmp("more"_bstr, L"more"));
+}
+#endif // (__WI_LIBCPP_STD_VER >= 20)
+
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
 #if (NTDDI_VERSION >= NTDDI_WINBLUE)
 #if defined(__cpp_impl_coroutine) || defined(__cpp_coroutines) || defined(_RESUMABLE_FUNCTIONS_SUPPORTED)

@@ -3445,6 +3445,56 @@ using com_timeout_failfast = com_timeout_t<err_failfast_policy>;
 
 #endif // WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
 
+#if (__WI_LIBCPP_STD_VER >= 20)
+/// endcond
+namespace details
+{
+    template <unsigned long N>
+    struct bstr_literal
+    {
+        struct layout_t
+        {
+            uint32_t size;
+            wchar_t value[N];
+
+            constexpr operator std::wstring_view() const
+            {
+                return {value, size / sizeof(wchar_t)};
+            }
+
+            constexpr operator wchar_t const*() const
+            {
+                return value;
+            }
+
+            constexpr operator BSTR() const
+            {
+                return const_cast<BSTR>(value);
+            }
+        };
+
+        layout_t layout{};
+
+        constexpr bstr_literal(const char (&str)[N]) noexcept
+        {
+            layout.size = (N - 1) * sizeof(wchar_t);
+            for (unsigned long i = 0; i < N; ++i)
+            {
+                layout.value[i] = str[i];
+            }
+        }
+    };
+} // namespace details
+/// @endcond
+
+template <details::bstr_literal literal>
+constexpr auto operator""_bstr()
+{
+    return literal.layout;
+}
+
+#endif // (__WI_LIBCPP_STD_VER >= 20)
+
 } // namespace wil
 
 #endif
