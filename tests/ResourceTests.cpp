@@ -958,3 +958,1196 @@ TEST_CASE("write_lock_required", "[resource]")
     std::shared_mutex sharedMutex;
     write_lock_function(std::unique_lock<std::shared_mutex>(sharedMutex));
 }
+
+// ---------------------------------------------------------------------------
+// Experimental "better" wil::format (std::format-like) prototype.
+//
+// Goals:
+//   * std::format-like call syntax with variadic templates (compile-time arg
+//     type validation) rather than printf-style va_args.
+//   * Avoid the binary bloat of fully statically-compiled formatters by
+//     type-erasing each argument behind a tiny stack-allocated callback that
+//     is asked (via a virtual call) to render itself into an output sink. The
+//     format engine itself is compiled exactly once regardless of the argument
+//     types in play.
+//   * NO dependency on <format>/<fmt> and NO exceptions: the core is "nothrow"
+//     and reports failures via HRESULT, so it is usable from C++20 code that
+//     does not want either. Built-in types are formatted by small hand-written
+//     routines; a practical subset of the std::format spec mini-language is
+//     supported.
+//   * Allow custom "format wrappers" that provide their own size/format logic.
+//
+// This is being prototyped here in ResourceTests.cpp and will be ported into
+// wil/resource.h once the shape is settled.
+// ---------------------------------------------------------------------------
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <type_traits>
+
+namespace wil_experimental
+{
+    // The destination that format pieces are written into. There are two
+    // concrete sinks: one that only measures (counts characters) and one that
+    // writes into a pre-sized buffer. The whole format operation runs twice:
+    // once to measure, once to write. This mirrors wil::str_build_nothrow and
+    // avoids reallocation / temporary string churn. Sinks never fail.
+    struct format_sink
+    {
+        virtual void append(const wchar_t* data, size_t count) noexcept = 0;
+
+        void append(std::wstring_view text) noexcept
+        {
+            append(text.data(), text.size());
+        }
+
+        void append(wchar_t c) noexcept
+        {
+            append(&c, 1);
+        }
+
+    protected:
+        ~format_sink() = default;
+    };
+
+    // Counts characters without storing them.
+    struct measuring_sink final : format_sink
+    {
+        size_t count = 0;
+
+        void append(const wchar_t*, size_t n) noexcept override
+        {
+            count += n;
+        }
+    };
+
+    // Writes characters into a fixed-size buffer (never overruns it).
+    struct buffer_sink final : format_sink
+    {
+        wchar_t* cursor = nullptr;
+        wchar_t* end = nullptr;
+
+        void append(const wchar_t* data, size_t n) noexcept override
+        {
+            const size_t remaining = static_cast<size_t>(end - cursor);
+            const size_t toCopy = n < remaining ? n : remaining;
+            ::memcpy(cursor, data, toCopy * sizeof(wchar_t));
+            cursor += toCopy;
+        }
+    };
+
+    // Parsed form of a std::format-style replacement-field spec. Supported:
+    //   [[fill]align][sign]["#"]["0"][width]["." precision][type]
+    // Not supported (yet): nested replacement fields for dynamic width or
+    // precision (e.g. "{:{}}"), and locale ('L').
+    struct format_spec
+    {
+        wchar_t fill = L' ';
+        wchar_t align = 0;    // 0 (unset), '<', '>', '^', or '=' (after sign)
+        wchar_t sign = L'-';  // '-' (negatives only), '+', or ' '
+        bool alternate = false; // '#'
+        bool zero = false;      // '0'
+        int width = 0;
+        int precision = -1; // -1 == unset
+        wchar_t type = 0;   // presentation type, 0 == default
+    };
+
+    constexpr bool is_align_char(wchar_t c) noexcept
+    {
+        return c == L'<' || c == L'>' || c == L'^';
+    }
+
+    // Parse a spec string. Returns E_INVALIDARG for malformed specs.
+    inline HRESULT parse_format_spec(std::wstring_view spec, format_spec& out) noexcept
+    {
+        out = format_spec{};
+        size_t pos = 0;
+        const size_t n = spec.size();
+
+        // [[fill]align]
+        if (n - pos >= 2 && is_align_char(spec[pos + 1]))
+        {
+            out.fill = spec[pos];
+            out.align = spec[pos + 1];
+            pos += 2;
+        }
+        else if (pos < n && is_align_char(spec[pos]))
+        {
+            out.align = spec[pos];
+            ++pos;
+        }
+
+        // [sign]
+        if (pos < n && (spec[pos] == L'+' || spec[pos] == L'-' || spec[pos] == L' '))
+        {
+            out.sign = spec[pos];
+            ++pos;
+        }
+
+        // ["#"]
+        if (pos < n && spec[pos] == L'#')
+        {
+            out.alternate = true;
+            ++pos;
+        }
+
+        // ["0"] - zero padding. Ignored if an explicit alignment was supplied.
+        if (pos < n && spec[pos] == L'0')
+        {
+            out.zero = true;
+            ++pos;
+        }
+
+        // [width]
+        if (pos < n && spec[pos] >= L'1' && spec[pos] <= L'9')
+        {
+            int width = 0;
+            while (pos < n && spec[pos] >= L'0' && spec[pos] <= L'9')
+            {
+                width = (width * 10) + (spec[pos] - L'0');
+                ++pos;
+            }
+            out.width = width;
+        }
+
+        // ["." precision]
+        if (pos < n && spec[pos] == L'.')
+        {
+            ++pos;
+            RETURN_HR_IF(E_INVALIDARG, pos >= n || spec[pos] < L'0' || spec[pos] > L'9');
+            int precision = 0;
+            while (pos < n && spec[pos] >= L'0' && spec[pos] <= L'9')
+            {
+                precision = (precision * 10) + (spec[pos] - L'0');
+                ++pos;
+            }
+            out.precision = precision;
+        }
+
+        // [type]
+        if (pos < n)
+        {
+            out.type = spec[pos];
+            ++pos;
+        }
+
+        RETURN_HR_IF(E_INVALIDARG, pos != n); // trailing garbage
+        return S_OK;
+    }
+
+    // Append 'count' copies of 'ch' to the sink.
+    inline void append_fill(format_sink& sink, wchar_t ch, size_t count) noexcept
+    {
+        wchar_t chunk[32];
+        for (auto& c : chunk)
+        {
+            c = ch;
+        }
+        while (count > 0)
+        {
+            const size_t batch = count < 32 ? count : 32;
+            sink.append(chunk, batch);
+            count -= batch;
+        }
+    }
+
+    // Emit 'body' padded to 'width'. 'zeroPoint' is the index in body after any
+    // sign/prefix, where zero-padding is inserted for '=' alignment.
+    inline void emit_aligned(
+        format_sink& sink, const wchar_t* body, size_t bodyLen, size_t zeroPoint, const format_spec& ps, wchar_t defaultAlign) noexcept
+    {
+        const size_t width = ps.width > 0 ? static_cast<size_t>(ps.width) : 0;
+        if (bodyLen >= width)
+        {
+            sink.append(body, bodyLen);
+            return;
+        }
+
+        wchar_t align = ps.align;
+        wchar_t fill = ps.fill;
+        if (ps.zero && ps.align == 0)
+        {
+            align = L'=';
+            fill = L'0';
+        }
+        if (align == 0)
+        {
+            align = defaultAlign;
+        }
+
+        const size_t pad = width - bodyLen;
+        switch (align)
+        {
+        case L'<':
+            sink.append(body, bodyLen);
+            append_fill(sink, fill, pad);
+            break;
+        case L'^':
+        {
+            const size_t left = pad / 2;
+            append_fill(sink, fill, left);
+            sink.append(body, bodyLen);
+            append_fill(sink, fill, pad - left);
+            break;
+        }
+        case L'=':
+            sink.append(body, zeroPoint);
+            append_fill(sink, fill, pad);
+            sink.append(body + zeroPoint, bodyLen - zeroPoint);
+            break;
+        case L'>':
+        default:
+            append_fill(sink, fill, pad);
+            sink.append(body, bodyLen);
+            break;
+        }
+    }
+
+    // Convert an unsigned magnitude to digits in the given base. Writes into
+    // 'buffer' (must hold at least 64 wchar_t) and returns the count.
+    inline size_t magnitude_to_digits(unsigned long long mag, unsigned base, bool upper, wchar_t* buffer) noexcept
+    {
+        const wchar_t* digits = upper ? L"0123456789ABCDEF" : L"0123456789abcdef";
+        wchar_t temp[64];
+        size_t count = 0;
+        do
+        {
+            temp[count++] = digits[mag % base];
+            mag /= base;
+        } while (mag != 0);
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            buffer[i] = temp[count - 1 - i];
+        }
+        return count;
+    }
+
+    inline HRESULT format_integer(format_sink& sink, unsigned long long mag, bool negative, const format_spec& ps) noexcept
+    {
+        unsigned base = 10;
+        bool upper = false;
+        const wchar_t* prefix = L"";
+        switch (ps.type)
+        {
+        case 0:
+        case L'd':
+            base = 10;
+            break;
+        case L'x':
+            base = 16;
+            prefix = L"0x";
+            break;
+        case L'X':
+            base = 16;
+            upper = true;
+            prefix = L"0X";
+            break;
+        case L'o':
+            base = 8;
+            prefix = L"0";
+            break;
+        case L'b':
+            base = 2;
+            prefix = L"0b";
+            break;
+        case L'B':
+            base = 2;
+            prefix = L"0B";
+            break;
+        default:
+            return E_INVALIDARG;
+        }
+
+        wchar_t body[80];
+        size_t len = 0;
+
+        // Sign.
+        if (negative)
+        {
+            body[len++] = L'-';
+        }
+        else if (ps.sign == L'+')
+        {
+            body[len++] = L'+';
+        }
+        else if (ps.sign == L' ')
+        {
+            body[len++] = L' ';
+        }
+
+        // Alternate-form prefix.
+        if (ps.alternate && base != 10)
+        {
+            for (const wchar_t* p = prefix; *p; ++p)
+            {
+                body[len++] = *p;
+            }
+        }
+
+        const size_t zeroPoint = len;
+        len += magnitude_to_digits(mag, base, upper, body + len);
+
+        emit_aligned(sink, body, len, zeroPoint, ps, L'>');
+        return S_OK;
+    }
+
+    inline HRESULT format_pointer(format_sink& sink, const void* value, const format_spec& ps) noexcept
+    {
+        wchar_t body[2 + 16 + 1];
+        size_t len = 0;
+        body[len++] = L'0';
+        body[len++] = L'x';
+        const size_t zeroPoint = len;
+        len += magnitude_to_digits(reinterpret_cast<uintptr_t>(value), 16, false, body + len);
+        emit_aligned(sink, body, len, zeroPoint, ps, L'>');
+        return S_OK;
+    }
+
+    inline HRESULT format_floating(format_sink& sink, long double value, const format_spec& ps) noexcept
+    {
+        // Build a narrow printf-style format string and let the CRT do the
+        // numeric conversion (one shared routine, no per-type bloat). Width and
+        // alignment are then applied by emit_aligned so std::format fill/align
+        // semantics are honored.
+        wchar_t pf[16];
+        size_t k = 0;
+        pf[k++] = L'%';
+        if (ps.sign == L'+')
+        {
+            pf[k++] = L'+';
+        }
+        else if (ps.sign == L' ')
+        {
+            pf[k++] = L' ';
+        }
+        if (ps.alternate)
+        {
+            pf[k++] = L'#';
+        }
+
+        wchar_t type = ps.type;
+        if (type == 0)
+        {
+            type = L'g';
+        }
+        switch (type)
+        {
+        case L'f':
+        case L'F':
+        case L'e':
+        case L'E':
+        case L'g':
+        case L'G':
+        case L'a':
+        case L'A':
+            break;
+        default:
+            return E_INVALIDARG;
+        }
+
+        if (ps.precision >= 0)
+        {
+            pf[k++] = L'.';
+            pf[k++] = L'*';
+        }
+        pf[k++] = L'L';
+        pf[k++] = type;
+        pf[k] = L'\0';
+
+        wchar_t buffer[512];
+        if (ps.precision >= 0)
+        {
+            RETURN_IF_FAILED(StringCchPrintfW(buffer, ARRAYSIZE(buffer), pf, ps.precision, value));
+        }
+        else
+        {
+            RETURN_IF_FAILED(StringCchPrintfW(buffer, ARRAYSIZE(buffer), pf, value));
+        }
+
+        const size_t len = wcslen(buffer);
+        const size_t zeroPoint = (len > 0 && (buffer[0] == L'-' || buffer[0] == L'+' || buffer[0] == L' ')) ? 1 : 0;
+        emit_aligned(sink, buffer, len, zeroPoint, ps, L'>');
+        return S_OK;
+    }
+
+    inline HRESULT format_text(format_sink& sink, std::wstring_view text, const format_spec& ps) noexcept
+    {
+        RETURN_HR_IF(E_INVALIDARG, ps.type != 0 && ps.type != L's');
+        if (ps.precision >= 0 && text.size() > static_cast<size_t>(ps.precision))
+        {
+            text = text.substr(0, static_cast<size_t>(ps.precision));
+        }
+        emit_aligned(sink, text.data(), text.size(), 0, ps, L'<');
+        return S_OK;
+    }
+
+    // Base for user-defined format wrappers (the "stretch" goal). Derive from
+    // this and provide:
+    //     HRESULT format(wil_experimental::format_sink& sink, std::wstring_view spec) const noexcept;
+    // The wrapper typically captures its subject by const reference.
+    struct custom_format_wrapper
+    {
+    };
+
+    template <typename T>
+    inline constexpr bool is_custom_format_wrapper_v = std::is_base_of_v<custom_format_wrapper, std::remove_cv_t<std::remove_reference_t<T>>>;
+
+    // Detects types that expose a contiguous wchar_t range via .data()/.size()
+    // (e.g. std::wstring, std::wstring_view).
+    template <typename T, typename = void>
+    struct is_wchar_view : std::false_type
+    {
+    };
+    template <typename T>
+    struct is_wchar_view<
+        T,
+        std::void_t<
+            decltype(static_cast<const wchar_t*>(std::declval<const T&>().data())),
+            decltype(static_cast<size_t>(std::declval<const T&>().size()))>> : std::true_type
+    {
+    };
+
+    template <typename T>
+    inline constexpr bool is_wstringish_v = std::is_convertible_v<T, const wchar_t*> || is_wchar_view<T>::value;
+
+    // Type-erased argument interface. Each argument passed to format() is
+    // wrapped in a typed_format_argument (allocated on the caller's stack) and
+    // referenced here through the base so the format engine itself is compiled
+    // exactly once, regardless of the argument types in play.
+    struct format_argument
+    {
+        virtual HRESULT render(format_sink& sink, std::wstring_view spec) const noexcept = 0;
+
+    protected:
+        ~format_argument() = default;
+    };
+
+    template <typename T>
+    struct typed_format_argument final : format_argument
+    {
+        const T& value;
+
+        explicit typed_format_argument(const T& v) noexcept : value(v)
+        {
+        }
+
+        HRESULT render(format_sink& sink, std::wstring_view spec) const noexcept override
+        {
+            if constexpr (is_custom_format_wrapper_v<T>)
+            {
+                // Custom wrappers do their own spec handling.
+                return value.format(sink, spec);
+            }
+            else
+            {
+                format_spec ps;
+                RETURN_IF_FAILED(parse_format_spec(spec, ps));
+
+                if constexpr (is_wstringish_v<T>)
+                {
+                    return format_text(sink, to_view(value), ps);
+                }
+                else if constexpr (std::is_same_v<T, wchar_t> || std::is_same_v<T, char>)
+                {
+                    if (ps.type == 0 || ps.type == L'c')
+                    {
+                        const wchar_t c = static_cast<wchar_t>(value);
+                        emit_aligned(sink, &c, 1, 0, ps, L'<');
+                        return S_OK;
+                    }
+                    return format_integer(sink, static_cast<unsigned long long>(static_cast<unsigned char>(value)), false, ps);
+                }
+                else if constexpr (std::is_same_v<T, bool>)
+                {
+                    if (ps.type == 0 || ps.type == L's')
+                    {
+                        return format_text(sink, value ? std::wstring_view(L"true") : std::wstring_view(L"false"), ps);
+                    }
+                    return format_integer(sink, value ? 1u : 0u, false, ps);
+                }
+                else if constexpr (std::is_integral_v<T>)
+                {
+                    if constexpr (std::is_signed_v<T>)
+                    {
+                        if (value < 0)
+                        {
+                            const auto mag = static_cast<unsigned long long>(0) - static_cast<unsigned long long>(value);
+                            return format_integer(sink, mag, true, ps);
+                        }
+                    }
+                    return format_integer(sink, static_cast<unsigned long long>(value), false, ps);
+                }
+                else if constexpr (std::is_floating_point_v<T>)
+                {
+                    return format_floating(sink, static_cast<long double>(value), ps);
+                }
+                else if constexpr (std::is_pointer_v<T>)
+                {
+                    return format_pointer(sink, static_cast<const void*>(value), ps);
+                }
+                else
+                {
+                    static_assert(sizeof(T) == 0, "wil_experimental::format does not support this argument type");
+                    return E_NOTIMPL;
+                }
+            }
+        }
+
+    private:
+        template <typename U>
+        static std::wstring_view to_view(const U& v) noexcept
+        {
+            if constexpr (std::is_convertible_v<U, const wchar_t*>)
+            {
+                const wchar_t* p = v;
+                return p ? std::wstring_view(p) : std::wstring_view();
+            }
+            else
+            {
+                return std::wstring_view(v.data(), v.size());
+            }
+        }
+    };
+
+    // The single, non-templated format engine. Splits the format string into
+    // literal runs and replacement fields and routes each field to the right
+    // type-erased argument. Nothrow: reports malformed input via HRESULT.
+    //
+    // Supported: auto-indexing ({}), manual indexing ({0}), escaped braces
+    // ({{ and }}), and the spec subset documented on format_spec. Not yet
+    // supported: nested replacement fields for dynamic width/precision.
+    inline HRESULT run_format(
+        format_sink& sink, std::wstring_view fmt, const format_argument* const* args, size_t argCount) noexcept
+    {
+        size_t autoIndex = 0;
+        size_t pos = 0;
+        const size_t n = fmt.size();
+
+        while (pos < n)
+        {
+            // Emit the run of literal text up to the next brace.
+            const size_t literalStart = pos;
+            while (pos < n && fmt[pos] != L'{' && fmt[pos] != L'}')
+            {
+                ++pos;
+            }
+            if (pos > literalStart)
+            {
+                sink.append(fmt.data() + literalStart, pos - literalStart);
+            }
+            if (pos >= n)
+            {
+                break;
+            }
+
+            const wchar_t brace = fmt[pos];
+            if ((pos + 1 < n) && (fmt[pos + 1] == brace))
+            {
+                sink.append(brace);
+                pos += 2;
+                continue;
+            }
+
+            RETURN_HR_IF(E_INVALIDARG, brace == L'}'); // stray '}'
+
+            // Parse a replacement field: '{' [index] [':' spec] '}'
+            ++pos; // consume '{'
+
+            size_t index = 0;
+            bool hasIndex = false;
+            while (pos < n && fmt[pos] >= L'0' && fmt[pos] <= L'9')
+            {
+                index = (index * 10) + static_cast<size_t>(fmt[pos] - L'0');
+                hasIndex = true;
+                ++pos;
+            }
+            if (!hasIndex)
+            {
+                index = autoIndex++;
+            }
+
+            std::wstring_view spec;
+            if (pos < n && fmt[pos] == L':')
+            {
+                ++pos; // consume ':'
+                const size_t specStart = pos;
+                while (pos < n && fmt[pos] != L'}')
+                {
+                    ++pos;
+                }
+                spec = fmt.substr(specStart, pos - specStart);
+            }
+
+            RETURN_HR_IF(E_INVALIDARG, pos >= n || fmt[pos] != L'}'); // unterminated field
+            ++pos;                                                    // consume '}'
+
+            RETURN_HR_IF(E_INVALIDARG, index >= argCount);
+            RETURN_IF_FAILED(args[index]->render(sink, spec));
+        }
+        return S_OK;
+    }
+
+    // Constexpr spec parser (a no-WIL-macros twin of parse_format_spec) so it
+    // can run during constant evaluation. Returns false on malformed specs.
+    constexpr bool parse_spec_ct(std::wstring_view spec, format_spec& out) noexcept
+    {
+        out = format_spec{};
+        size_t pos = 0;
+        const size_t n = spec.size();
+
+        if (n - pos >= 2 && is_align_char(spec[pos + 1]))
+        {
+            out.fill = spec[pos];
+            out.align = spec[pos + 1];
+            pos += 2;
+        }
+        else if (pos < n && is_align_char(spec[pos]))
+        {
+            out.align = spec[pos];
+            ++pos;
+        }
+
+        if (pos < n && (spec[pos] == L'+' || spec[pos] == L'-' || spec[pos] == L' '))
+        {
+            out.sign = spec[pos];
+            ++pos;
+        }
+        if (pos < n && spec[pos] == L'#')
+        {
+            out.alternate = true;
+            ++pos;
+        }
+        if (pos < n && spec[pos] == L'0')
+        {
+            out.zero = true;
+            ++pos;
+        }
+        if (pos < n && spec[pos] >= L'1' && spec[pos] <= L'9')
+        {
+            int width = 0;
+            while (pos < n && spec[pos] >= L'0' && spec[pos] <= L'9')
+            {
+                width = (width * 10) + (spec[pos] - L'0');
+                ++pos;
+            }
+            out.width = width;
+        }
+        if (pos < n && spec[pos] == L'.')
+        {
+            ++pos;
+            if (pos >= n || spec[pos] < L'0' || spec[pos] > L'9')
+            {
+                return false;
+            }
+            int precision = 0;
+            while (pos < n && spec[pos] >= L'0' && spec[pos] <= L'9')
+            {
+                precision = (precision * 10) + (spec[pos] - L'0');
+                ++pos;
+            }
+            out.precision = precision;
+        }
+        if (pos < n)
+        {
+            out.type = spec[pos];
+            ++pos;
+        }
+        return pos == n;
+    }
+
+    // Compile-time validation of a single field's spec against the static type
+    // of the argument it formats. This mirrors what the runtime per-type
+    // formatters accept (and what std::formatter<T> would allow): the
+    // presentation type must be sensible for T, and options like precision or
+    // sign are only permitted where they make sense. Custom format wrappers opt
+    // out (they validate their own spec at runtime).
+    template <typename T>
+    constexpr bool validate_spec_for(std::wstring_view spec) noexcept
+    {
+        if constexpr (is_custom_format_wrapper_v<T>)
+        {
+            return true;
+        }
+        else
+        {
+            format_spec ps;
+            if (!parse_spec_ct(spec, ps))
+            {
+                return false;
+            }
+            const wchar_t t = ps.type;
+            const bool hasPrecision = ps.precision >= 0;
+            const bool hasNumericFlags = (ps.sign != L'-') || ps.alternate || ps.zero;
+
+            if constexpr (is_wstringish_v<T>)
+            {
+                // strings: only 's', no sign/#/0; precision (truncation) allowed.
+                return (t == 0 || t == L's') && !hasNumericFlags;
+            }
+            else if constexpr (std::is_same_v<T, bool>)
+            {
+                return (t == 0 || t == L's' || t == L'd' || t == L'b' || t == L'B' || t == L'o' || t == L'x' || t == L'X') &&
+                       !hasPrecision;
+            }
+            else if constexpr (std::is_same_v<T, wchar_t> || std::is_same_v<T, char>)
+            {
+                return (t == 0 || t == L'c' || t == L'd' || t == L'b' || t == L'B' || t == L'o' || t == L'x' || t == L'X') &&
+                       !hasPrecision;
+            }
+            else if constexpr (std::is_integral_v<T>)
+            {
+                return (t == 0 || t == L'd' || t == L'b' || t == L'B' || t == L'o' || t == L'x' || t == L'X') && !hasPrecision;
+            }
+            else if constexpr (std::is_floating_point_v<T>)
+            {
+                return (t == 0 || t == L'a' || t == L'A' || t == L'e' || t == L'E' || t == L'f' || t == L'F' || t == L'g' ||
+                        t == L'G');
+            }
+            else if constexpr (std::is_pointer_v<T>)
+            {
+                return (t == 0 || t == L'p' || t == L'P') && !hasNumericFlags && !hasPrecision;
+            }
+            else
+            {
+                return false; // unsupported argument type
+            }
+        }
+    }
+
+    using spec_validator_fn = bool (*)(std::wstring_view);
+
+    // Core constexpr validator. Walks the format string checking brace balance,
+    // field syntax, index range, and auto/manual indexing rules. When
+    // 'validators' is non-null it additionally type-checks each field's spec
+    // against the argument at that index (validators must then have one entry
+    // per argument).
+    constexpr bool validate_impl(std::wstring_view fmt, size_t argCount, const spec_validator_fn* validators) noexcept
+    {
+        size_t pos = 0;
+        const size_t n = fmt.size();
+        size_t autoIndex = 0;
+        bool usedAuto = false;
+        bool usedManual = false;
+
+        while (pos < n)
+        {
+            const wchar_t c = fmt[pos];
+            if (c == L'{')
+            {
+                if (pos + 1 < n && fmt[pos + 1] == L'{')
+                {
+                    pos += 2; // escaped '{{'
+                    continue;
+                }
+
+                ++pos; // consume '{'
+
+                bool hasIndex = false;
+                size_t index = 0;
+                while (pos < n && fmt[pos] >= L'0' && fmt[pos] <= L'9')
+                {
+                    index = (index * 10) + static_cast<size_t>(fmt[pos] - L'0');
+                    hasIndex = true;
+                    ++pos;
+                }
+
+                size_t fieldIndex = 0;
+                if (hasIndex)
+                {
+                    usedManual = true;
+                    if (index >= argCount)
+                    {
+                        return false; // index out of range
+                    }
+                    fieldIndex = index;
+                }
+                else
+                {
+                    usedAuto = true;
+                    if (autoIndex >= argCount)
+                    {
+                        return false; // more {} fields than arguments
+                    }
+                    fieldIndex = autoIndex;
+                    ++autoIndex;
+                }
+
+                std::wstring_view spec;
+                if (pos < n && fmt[pos] == L':')
+                {
+                    ++pos; // consume ':'
+                    const size_t specStart = pos;
+                    while (pos < n && fmt[pos] != L'}')
+                    {
+                        ++pos;
+                    }
+                    spec = fmt.substr(specStart, pos - specStart);
+                }
+
+                if (pos >= n || fmt[pos] != L'}')
+                {
+                    return false; // unterminated replacement field
+                }
+                ++pos; // consume '}'
+
+                if (validators && !validators[fieldIndex](spec))
+                {
+                    return false; // spec not valid for the argument's type
+                }
+            }
+            else if (c == L'}')
+            {
+                if (pos + 1 < n && fmt[pos + 1] == L'}')
+                {
+                    pos += 2; // escaped '}}'
+                    continue;
+                }
+                return false; // stray '}'
+            }
+            else
+            {
+                ++pos;
+            }
+        }
+
+        if (usedAuto && usedManual)
+        {
+            return false; // cannot mix automatic and manual indexing
+        }
+        return true;
+    }
+
+    // Constexpr structural validator (counts only). Checks that braces are
+    // balanced/escaped, that every replacement field is well-formed, that
+    // referenced argument indices are in range, that automatic indexing does
+    // not run past 'argCount', and that automatic and manual indexing are not
+    // mixed. It does NOT type-check the spec against argument types - use
+    // validate_types for that. Being constexpr, usable in static_assert.
+    constexpr bool validate(std::wstring_view fmt, size_t argCount) noexcept
+    {
+        return validate_impl(fmt, argCount, nullptr);
+    }
+
+    // Constexpr validator that additionally checks each field's spec against the
+    // static type of the corresponding argument (Args in order). This is what
+    // the consteval format_string constructor uses, so an unsuitable spec such
+    // as format(L"{:x}", L"text") or format(L"{:.2f}", 42) fails to compile.
+    template <typename... Args>
+    constexpr bool validate_types(std::wstring_view fmt) noexcept
+    {
+        const spec_validator_fn validators[sizeof...(Args) + 1] = {&validate_spec_for<Args>..., nullptr};
+        return validate_impl(fmt, sizeof...(Args), validators);
+    }
+
+    // Measures, allocates via wil's string_maker, then writes. This is templated
+    // only on the output string type (not on the argument types), so the bulk of
+    // the formatting work is compiled once per string_type rather than once per
+    // unique set of argument types.
+    template <typename string_type>
+    HRESULT format_to_maker(
+        string_type& result, std::wstring_view fmt, const format_argument* const* table, size_t argCount) noexcept
+    {
+        measuring_sink measure;
+        RETURN_IF_FAILED(run_format(measure, fmt, table, argCount));
+
+        wil::details::string_maker<string_type> maker;
+        RETURN_IF_FAILED(maker.make(nullptr, measure.count));
+
+        buffer_sink writer;
+        writer.cursor = maker.buffer();
+        writer.end = writer.cursor + measure.count;
+        RETURN_IF_FAILED(run_format(writer, fmt, table, argCount));
+
+        result = maker.release();
+        return S_OK;
+    }
+
+    // Runtime entry point (the format string is not validated at compile time -
+    // analogous to std::vformat). Builds the type-erased argument table on the
+    // stack, then hands off to the string-type-only format_to_maker.
+    template <typename string_type, typename... Args>
+    HRESULT vformat_nothrow(string_type& result, std::wstring_view fmt, const Args&... args) noexcept
+    {
+        std::tuple<typed_format_argument<Args>...> typedArgs{typed_format_argument<Args>(args)...};
+
+        const format_argument* table[sizeof...(Args) + 1] = {};
+        size_t i = 0;
+        std::apply(
+            [&](auto&... a) {
+                ((table[i++] = &a), ...);
+            },
+            typedArgs);
+
+        return format_to_maker(result, fmt, table, sizeof...(Args));
+    }
+
+#ifdef __cpp_consteval
+    /// @cond
+    namespace details
+    {
+        // Referencing this non-constexpr function from a constant-evaluated
+        // context makes the program ill-formed, which is how an invalid format
+        // string is turned into a compile error (no exceptions required).
+        inline void invalid_format_string_detected() noexcept
+        {
+        }
+    } // namespace details
+    /// @endcond
+
+    // A format-string wrapper whose consteval constructor validates the string
+    // against the number of supplied arguments at compile time (modeled on
+    // std::basic_format_string). Construction from a non-constant string is
+    // itself a compile error, so this is only reachable with literal/constexpr
+    // formats.
+    template <typename... Args>
+    class basic_format_string
+    {
+    public:
+        template <typename T, std::enable_if_t<std::is_convertible_v<const T&, std::wstring_view>, int> = 0>
+        consteval basic_format_string(const T& fmt) : m_value(fmt)
+        {
+            if (!validate_types<Args...>(m_value))
+            {
+                details::invalid_format_string_detected(); // ill-formed: invalid format string
+            }
+        }
+
+        WI_NODISCARD constexpr std::wstring_view get() const noexcept
+        {
+            return m_value;
+        }
+
+    private:
+        std::wstring_view m_value;
+    };
+
+    // Hiding type_identity_t inside the alias (as the standard library does)
+    // keeps the argument types a non-deduced context in the signatures below,
+    // so Args is deduced solely from the trailing function arguments.
+    template <typename... Args>
+    using format_string = basic_format_string<std::type_identity_t<Args>...>;
+
+    // Compile-time-validated nothrow entry point. The format string is checked
+    // against the argument count (and structure) by basic_format_string's
+    // consteval constructor before this is ever called.
+    template <typename string_type, typename... Args>
+    HRESULT format_nothrow(string_type& result, format_string<Args...> fmt, const Args&... args) noexcept
+    {
+        return vformat_nothrow(result, fmt.get(), args...);
+    }
+#else  // !__cpp_consteval
+    // Pre-C++20 fallback: no compile-time validation, runtime behavior only.
+    template <typename string_type, typename... Args>
+    HRESULT format_nothrow(string_type& result, std::wstring_view fmt, const Args&... args) noexcept
+    {
+        return vformat_nothrow(result, fmt, args...);
+    }
+#endif // __cpp_consteval
+
+#ifdef WIL_ENABLE_EXCEPTIONS
+    // Throwing convenience wrappers, layered on top of the nothrow core. When
+    // compile-time validation is available these also reject invalid format
+    // strings at compile time.
+#ifdef __cpp_consteval
+    template <typename string_type, typename... Args>
+    string_type format_as(format_string<Args...> fmt, const Args&... args)
+    {
+        string_type result{};
+        THROW_IF_FAILED(vformat_nothrow(result, fmt.get(), args...));
+        return result;
+    }
+
+    template <typename... Args>
+    std::wstring format(format_string<Args...> fmt, const Args&... args)
+    {
+        return format_as<std::wstring>(fmt, args...);
+    }
+#else  // !__cpp_consteval
+    template <typename string_type, typename... Args>
+    string_type format_as(std::wstring_view fmt, const Args&... args)
+    {
+        string_type result{};
+        THROW_IF_FAILED(vformat_nothrow(result, fmt, args...));
+        return result;
+    }
+
+    template <typename... Args>
+    std::wstring format(std::wstring_view fmt, const Args&... args)
+    {
+        return format_as<std::wstring>(fmt, args...);
+    }
+#endif // __cpp_consteval
+#endif // WIL_ENABLE_EXCEPTIONS
+
+    // Example custom format wrapper used by the tests below: renders an
+    // unsigned value as fixed-width hex, regardless of spec.
+    struct as_hex8 : custom_format_wrapper
+    {
+        const unsigned int& value;
+
+        explicit as_hex8(const unsigned int& v) noexcept : value(v)
+        {
+        }
+
+        HRESULT format(format_sink& sink, std::wstring_view /*spec*/) const noexcept
+        {
+            wchar_t buffer[2 + 8 + 1];
+            RETURN_IF_FAILED(StringCchPrintfW(buffer, ARRAYSIZE(buffer), L"0x%08X", value));
+            sink.append(buffer, wcslen(buffer));
+            return S_OK;
+        }
+    };
+} // namespace wil_experimental
+
+namespace
+{
+    // Helper that exercises the nothrow core with a string_maker target that is
+    // available even when exceptions are disabled (unlike string_maker<std::wstring>,
+    // which lives in wil/stl.h behind WIL_ENABLE_EXCEPTIONS). Returns the formatted
+    // text for easy comparison. Uses the runtime (vformat) path because the format
+    // string arrives as a runtime parameter here.
+    template <typename... Args>
+    std::wstring wfmt(std::wstring_view fmt, const Args&... args)
+    {
+        wil::unique_cotaskmem_string result;
+        REQUIRE(SUCCEEDED(wil_experimental::vformat_nothrow(result, fmt, args...)));
+        return std::wstring(result.get());
+    }
+}
+
+TEST_CASE("WilFormat::Basic", "[resource][format]")
+{
+    SECTION("literals and escaping")
+    {
+        REQUIRE(wfmt(L"hello world") == L"hello world");
+        REQUIRE(wfmt(L"{{not a field}}") == L"{not a field}");
+        REQUIRE(wfmt(L"a{{b}}c") == L"a{b}c");
+    }
+
+    SECTION("auto indexing")
+    {
+        REQUIRE(wfmt(L"{} + {} = {}", 1, 2, 3) == L"1 + 2 = 3");
+    }
+
+    SECTION("manual indexing and reuse")
+    {
+        REQUIRE(wfmt(L"{0}{1}{0}", L"a", L"b") == L"aba");
+    }
+
+    SECTION("integer specs")
+    {
+        REQUIRE(wfmt(L"{:04}", 42) == L"0042");
+        REQUIRE(wfmt(L"{:>6}", 42) == L"    42");
+        REQUIRE(wfmt(L"{:<6}|", 42) == L"42    |");
+        REQUIRE(wfmt(L"{:^6}", 42) == L"  42  ");
+        REQUIRE(wfmt(L"{:*^7}", 42) == L"**42***");
+        REQUIRE(wfmt(L"{:#x}", 255) == L"0xff");
+        REQUIRE(wfmt(L"{:#X}", 255) == L"0XFF");
+        REQUIRE(wfmt(L"{:#b}", 5) == L"0b101");
+        REQUIRE(wfmt(L"{:08x}", 255) == L"000000ff");
+        REQUIRE(wfmt(L"{:+}", 42) == L"+42");
+        REQUIRE(wfmt(L"{}", -42) == L"-42");
+        REQUIRE(wfmt(L"{:06}", -42) == L"-00042");
+    }
+
+    SECTION("string specs")
+    {
+        REQUIRE(wfmt(L"{:>8}", L"hi") == L"      hi");
+        REQUIRE(wfmt(L"{:.3}", L"truncated") == L"tru");
+    }
+
+    SECTION("mixed argument types")
+    {
+        REQUIRE(wfmt(L"{} {} {}", std::wstring(L"str"), std::wstring_view(L"view"), L"lit") == L"str view lit");
+        REQUIRE(wfmt(L"{}", 3.5) == L"3.5");
+        REQUIRE(wfmt(L"{:.2f}", 3.14159) == L"3.14");
+        REQUIRE(wfmt(L"{}", true) == L"true");
+        REQUIRE(wfmt(L"{}", L'Z') == L"Z");
+    }
+}
+
+TEST_CASE("WilFormat::CustomWrapper", "[resource][format]")
+{
+    unsigned int v = 255;
+    REQUIRE(wfmt(L"val={}", wil_experimental::as_hex8(v)) == L"val=0x000000FF");
+}
+
+TEST_CASE("WilFormat::StringMakerTarget", "[resource][format]")
+{
+    // Literal format string flows through the compile-time-validated entry point
+    // (format_nothrow) where available; a runtime string would use vformat_nothrow.
+    wil::unique_cotaskmem_string result;
+    REQUIRE(SUCCEEDED(wil_experimental::format_nothrow(result, L"{}-{}", 7, L"x")));
+    REQUIRE(wcscmp(result.get(), L"7-x") == 0);
+}
+
+TEST_CASE("WilFormat::Errors", "[resource][format]")
+{
+    wil::unique_cotaskmem_string s;
+    // Malformed runtime format strings surface as E_INVALIDARG from the runtime
+    // (vformat) path. The equivalent literals are rejected at compile time when
+    // compile-time validation is available (see WilFormat::Validate).
+    REQUIRE(wil_experimental::vformat_nothrow(s, L"{1}", 1) == E_INVALIDARG);
+    REQUIRE(wil_experimental::vformat_nothrow(s, L"{") == E_INVALIDARG);
+    REQUIRE(wil_experimental::vformat_nothrow(s, L"}") == E_INVALIDARG);
+    REQUIRE(wil_experimental::vformat_nothrow(s, L"{:q}", 1) == E_INVALIDARG); // bad type
+}
+
+// Compile-time validation of the format string against the argument count.
+// validate() is constexpr, so these are checked by the compiler (static_assert).
+static_assert(wil_experimental::validate(L"{} + {} = {}", 3), "three auto fields, three args");
+static_assert(wil_experimental::validate(L"{0}{1}{0}", 2), "manual indexing in range");
+static_assert(wil_experimental::validate(L"{{escaped}} {}", 1), "escaped braces plus one field");
+static_assert(!wil_experimental::validate(L"{", 1), "unterminated field");
+static_assert(!wil_experimental::validate(L"}", 0), "stray close brace");
+static_assert(!wil_experimental::validate(L"{2}", 1), "index out of range");
+static_assert(!wil_experimental::validate(L"{} {} {}", 2), "more fields than args");
+static_assert(!wil_experimental::validate(L"{0} {}", 2), "mixed manual and automatic indexing");
+
+// Per-type spec validation (validate_types). The spec must be sensible for the
+// static type of the argument at that position.
+static_assert(wil_experimental::validate_types<int>(L"{:x}"), "hex is valid for int");
+static_assert(!wil_experimental::validate_types<const wchar_t*>(L"{:x}"), "hex is not valid for a string");
+static_assert(!wil_experimental::validate_types<int>(L"{:.2f}"), "float spec is not valid for int");
+static_assert(wil_experimental::validate_types<double>(L"{:.2f}"), "precision + 'f' is valid for double");
+static_assert(!wil_experimental::validate_types<int>(L"{3}"), "index out of range for a single int arg");
+static_assert(wil_experimental::validate_types<int, const wchar_t*>(L"{0:d} {1:>5}"), "matching specs per type");
+static_assert(!wil_experimental::validate_types<const wchar_t*>(L"{:+}"), "sign is not valid for a string");
+
+TEST_CASE("WilFormat::Validate", "[resource][format]")
+{
+    // STATIC_REQUIRE performs a static_assert (and registers a passing check).
+    STATIC_REQUIRE(wil_experimental::validate(L"{}-{}", 2));
+    STATIC_REQUIRE(wil_experimental::validate(L"no fields here", 0));
+    STATIC_REQUIRE(wil_experimental::validate(L"{:>8}", 1));
+
+    STATIC_REQUIRE_FALSE(wil_experimental::validate(L"{", 1));
+    STATIC_REQUIRE_FALSE(wil_experimental::validate(L"}", 0));
+    STATIC_REQUIRE_FALSE(wil_experimental::validate(L"{5}", 1));
+    STATIC_REQUIRE_FALSE(wil_experimental::validate(L"{} {} {}", 2));
+    STATIC_REQUIRE_FALSE(wil_experimental::validate(L"{0} {}", 2));
+
+    // Per-type spec validation.
+    STATIC_REQUIRE(wil_experimental::validate_types<int>(L"{:#06x}"));
+    STATIC_REQUIRE(wil_experimental::validate_types<double>(L"{:+.3e}"));
+    STATIC_REQUIRE_FALSE(wil_experimental::validate_types<int>(L"{:s}"));      // 's' not valid for int
+    STATIC_REQUIRE_FALSE(wil_experimental::validate_types<double>(L"{:x}"));   // 'x' not valid for double
+    STATIC_REQUIRE_FALSE(wil_experimental::validate_types<const wchar_t*>(L"{:08}")); // numeric flags on string
+
+    // validate() is also usable at runtime.
+    REQUIRE(wil_experimental::validate(L"{} {}", 2));
+    REQUIRE_FALSE(wil_experimental::validate(L"{}", 0));
+}
+
+#ifdef WIL_ENABLE_EXCEPTIONS
+TEST_CASE("WilFormat::ThrowingWrapper", "[resource][format]")
+{
+    REQUIRE(wil_experimental::format(L"{} + {} = {}", 1, 2, 3) == L"1 + 2 = 3");
+
+    // An invalid literal such as format(L"{1}", 1) is rejected at compile time
+    // when compile-time validation is available, so it is not exercised here.
+    // Runtime-string error handling is covered by WilFormat::Errors.
+}
+#endif // WIL_ENABLE_EXCEPTIONS
+
