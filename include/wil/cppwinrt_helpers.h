@@ -292,16 +292,7 @@ namespace details
     // Number of elements to prefetch per GetMany call. Aim for ~2KB blocks, clamped to [1, 128].
     constexpr uint32_t batched_block_size(size_t element_size) noexcept
     {
-        size_t count = element_size ? (size_t{2048} / element_size) : size_t{128};
-        if (count < 1)
-        {
-            count = 1;
-        }
-        if (count > 128)
-        {
-            count = 128;
-        }
-        return static_cast<uint32_t>(count);
+        return static_cast<uint32_t>(std::clamp<size_t>(size_t{2048} / (element_size ? element_size : 1), 1, 128));
     }
 
     // Forward iterator over an indexed (GetAt-capable) collection that prefetches a block per
