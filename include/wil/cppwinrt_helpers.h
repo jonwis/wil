@@ -295,117 +295,48 @@ namespace details
         return static_cast<uint32_t>(std::clamp<size_t>(size_t{2048} / (element_size ? element_size : 1), 1, 128));
     }
 
-    // Forward iterator over an indexed (GetAt-capable) collection that prefetches a block per
-    // GetMany call and serves sequential reads from it, so range-for crosses the ABI ~once per
-    // block instead of once per element.
-    template <typename Collection>
-    struct batched_indexed_iterator
-    {
-        using value_type = decltype(std::declval<Collection>().GetAt(0));
-        using iterator_category = std::input_iterator_tag;
-        using difference_type = std::ptrdiff_t;
-        using pointer = value_type const*;
-        using reference = value_type const&;
-
-        static constexpr uint32_t buffer_capacity = batched_block_size(sizeof(value_type));
-
-        batched_indexed_iterator() = default;
-
-        batched_indexed_iterator(Collection collection, uint32_t index) :
-            m_collection(std::move(collection)), m_index(index)
-        {
-        }
-
-        reference operator*() const
-        {
-            return fetch(m_index);
-        }
-
-        pointer operator->() const
-        {
-            return std::addressof(fetch(m_index));
-        }
-
-        batched_indexed_iterator& operator++()
-        {
-            ++m_index;
-            return *this;
-        }
-
-        batched_indexed_iterator operator++(int)
-        {
-            auto previous = *this;
-            ++m_index;
-            return previous;
-        }
-
-        bool operator==(batched_indexed_iterator const& other) const noexcept
-        {
-            return m_index == other.m_index;
-        }
-
-        bool operator!=(batched_indexed_iterator const& other) const noexcept
-        {
-            return m_index != other.m_index;
-        }
-
-    private:
-        reference fetch(uint32_t index) const
-        {
-            if ((index < m_buffer_base) || (index >= m_buffer_base + m_buffer_size))
-            {
-                m_buffer_base = index;
-                m_buffer_size = m_collection.GetMany(index, m_buffer);
-            }
-
-            if (index < m_buffer_base + m_buffer_size)
-            {
-                return m_buffer[index - m_buffer_base];
-            }
-
-            // Past the end of what GetMany returned; defer to GetAt so component bounds behavior wins.
-            m_fallback = m_collection.GetAt(index);
-            return m_fallback;
-        }
-
-        Collection m_collection{nullptr};
-        uint32_t m_index{0};
-        mutable uint32_t m_buffer_base{0};
-        mutable uint32_t m_buffer_size{0};
-        mutable value_type m_fallback{empty<value_type>()};
-        mutable std::array<value_type, buffer_capacity> m_buffer{};
-    };
-
-    template <typename Collection>
-    struct batched_indexed_range
-    {
-        explicit batched_indexed_range(Collection collection) :
-            m_collection(std::move(collection)), m_size(m_collection.Size())
-        {
-        }
-
-        batched_indexed_iterator<Collection> begin() const
-        {
-            return {m_collection, 0};
-        }
-
-        batched_indexed_iterator<Collection> end() const
-        {
-            return {m_collection, m_size};
-        }
-
-    private:
-        Collection m_collection;
-        uint32_t m_size{0};
-    };
-
-    // Single-pass forward iterator that batches an IIterator via GetMany into a small buffer and
-    // yields from it, so range-for over a collection that lacks GetAt crosses the ABI once per
-    // block instead of once per element (Current/MoveNext).
+    // Refills a block from an IIterator via GetMany. The iterator carries its own cursor, so each
+    // call just pulls the next run of elements; a short (or empty) block means exhaustion.
     template <typename Iterator>
-    struct batched_buffered_iterator
+    struct batched_iterator_source
     {
         using value_type = decltype(std::declval<Iterator>().Current());
+
+        uint32_t fill(winrt::array_view<value_type> block)
+        {
+            return m_iterator.GetMany(block);
+        }
+
+        Iterator m_iterator{};
+    };
+
+    // Refills a block from an indexed (GetAt-capable) collection via GetMany, tracking the running
+    // start index. A short (or empty) block means exhaustion, so no end-index or Size() is needed.
+    template <typename Collection>
+    struct batched_indexed_source
+    {
+        using value_type = decltype(std::declval<Collection>().GetAt(0));
+
+        uint32_t fill(winrt::array_view<value_type> block)
+        {
+            uint32_t const fetched = m_collection.GetMany(m_start, block);
+            m_start += fetched;
+            return fetched;
+        }
+
+        Collection m_collection{};
+        uint32_t m_start{0};
+    };
+
+    // Single-pass input iterator that batches a source via GetMany into a small buffer and yields
+    // from it, so range-for crosses the ABI once per block instead of once per element. The two
+    // shapes (IIterator vs indexed collection) differ only in how a block is refilled, which the
+    // Source policy supplies. A block shorter than the buffer signals the last block; a full block
+    // is followed by one more refill (which returns empty at the boundary), matching to_vector.
+    template <typename Source>
+    struct batched_iterator
+    {
+        using value_type = typename Source::value_type;
         using iterator_category = std::input_iterator_tag;
         using difference_type = std::ptrdiff_t;
         using pointer = value_type const*;
@@ -413,9 +344,9 @@ namespace details
 
         static constexpr uint32_t buffer_capacity = batched_block_size(sizeof(value_type));
 
-        batched_buffered_iterator() = default;
+        batched_iterator() = default; // default-constructed is the end sentinel (m_size == 0)
 
-        explicit batched_buffered_iterator(Iterator iterator) : m_iterator(std::move(iterator))
+        explicit batched_iterator(Source source) : m_source(std::move(source))
         {
             fill();
         }
@@ -430,22 +361,30 @@ namespace details
             return std::addressof(m_buffer[m_index]);
         }
 
-        batched_buffered_iterator& operator++()
+        batched_iterator& operator++()
         {
             if (++m_index == m_size)
             {
-                fill();
+                // A full block might have more behind it; a short block was the last one.
+                if (m_size == buffer_capacity)
+                {
+                    fill();
+                }
+                else
+                {
+                    m_size = 0;
+                }
             }
 
             return *this;
         }
 
-        bool operator==(batched_buffered_iterator const& other) const noexcept
+        bool operator==(batched_iterator const& other) const noexcept
         {
             return (m_size == 0) && (other.m_size == 0);
         }
 
-        bool operator!=(batched_buffered_iterator const& other) const noexcept
+        bool operator!=(batched_iterator const& other) const noexcept
         {
             return !(*this == other);
         }
@@ -454,34 +393,34 @@ namespace details
         void fill()
         {
             m_index = 0;
-            m_size = m_iterator ? m_iterator.GetMany(m_buffer) : 0;
+            m_size = m_source.fill(m_buffer);
         }
 
-        Iterator m_iterator{nullptr};
+        Source m_source{};
         std::array<value_type, buffer_capacity> m_buffer{};
         uint32_t m_size{0};
         uint32_t m_index{0};
     };
 
-    template <typename Iterator>
-    struct batched_iterable_range
+    template <typename Source>
+    struct batched_range
     {
-        explicit batched_iterable_range(Iterator iterator) : m_iterator(std::move(iterator))
+        explicit batched_range(Source source) : m_source(std::move(source))
         {
         }
 
-        batched_buffered_iterator<Iterator> begin()
+        batched_iterator<Source> begin()
         {
-            return batched_buffered_iterator<Iterator>{std::move(m_iterator)};
+            return batched_iterator<Source>{std::move(m_source)};
         }
 
-        batched_buffered_iterator<Iterator> end() const noexcept
+        batched_iterator<Source> end() const noexcept
         {
             return {};
         }
 
     private:
-        Iterator m_iterator;
+        Source m_source;
     };
 } // namespace details
 /// @endcond
@@ -570,16 +509,16 @@ auto batched(TSrc src)
 {
     if constexpr (details::is_winrt_vector_like<TSrc>::value)
     {
-        return details::batched_indexed_range<TSrc>{std::move(src)};
+        return details::batched_range<details::batched_indexed_source<TSrc>>{{std::move(src), 0}};
     }
     else if constexpr (details::is_winrt_iterator_like<TSrc>::value)
     {
-        return details::batched_iterable_range<TSrc>{std::move(src)};
+        return details::batched_range<details::batched_iterator_source<TSrc>>{{std::move(src)}};
     }
     else
     {
         using Iterator = decltype(src.First());
-        return details::batched_iterable_range<Iterator>{src.First()};
+        return details::batched_range<details::batched_iterator_source<Iterator>>{{src.First()}};
     }
 }
 } // namespace wil
