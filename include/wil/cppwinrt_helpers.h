@@ -655,33 +655,33 @@ winrt::Windows::Foundation::IAsyncOperation<int32_t> GetCachedValue()
 {
     if (m_haveValue)
     {
-        return wil::make_ready(m_value); // no coroutine frame for the already-known answer
+        return wil::already_complete(m_value); // no coroutine frame for the already-known answer
     }
     return ComputeValueAsync();
 }
 @endcode
 */
 template <typename TResult>
-winrt::Windows::Foundation::IAsyncOperation<std::decay_t<TResult>> make_ready(TResult&& value)
+winrt::Windows::Foundation::IAsyncOperation<std::decay_t<TResult>> already_complete(TResult&& value)
 {
     return winrt::make<details::ready_async_operation<std::decay_t<TResult>>>(std::forward<TResult>(value));
 }
 
 //! Returns an IAsyncAction already in the Completed state, with no coroutine frame.
-inline winrt::Windows::Foundation::IAsyncAction make_ready()
+inline winrt::Windows::Foundation::IAsyncAction already_complete()
 {
     return winrt::make<details::ready_async_action>();
 }
 
 //! Returns an IAsyncAction already in the Error state carrying @p error; GetResults() throws it.
-inline winrt::Windows::Foundation::IAsyncAction make_failed(winrt::hresult error)
+inline winrt::Windows::Foundation::IAsyncAction already_failed(winrt::hresult error)
 {
     return winrt::make<details::ready_async_action>(error);
 }
 
 //! Returns an IAsyncOperation<T> already in the Error state carrying @p error; GetResults() throws it.
 template <typename TResult>
-winrt::Windows::Foundation::IAsyncOperation<TResult> make_failed(winrt::hresult error)
+winrt::Windows::Foundation::IAsyncOperation<TResult> already_failed(winrt::hresult error)
 {
     return winrt::make<details::ready_async_operation<TResult>>(error);
 }

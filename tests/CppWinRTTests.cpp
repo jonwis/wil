@@ -932,7 +932,7 @@ TEST_CASE("CppWinRTTests::MakeReady", "[cppwinrt]")
 
     // Completed synchronously with a value, with no coroutine frame.
     {
-        IAsyncOperation<int32_t> op = wil::make_ready(42);
+        IAsyncOperation<int32_t> op = wil::already_complete(42);
         REQUIRE(op.Status() == AsyncStatus::Completed);
         REQUIRE(op.ErrorCode() == 0);
         REQUIRE(op.GetResults() == 42);
@@ -942,14 +942,14 @@ TEST_CASE("CppWinRTTests::MakeReady", "[cppwinrt]")
     // co_await yields the value through the synchronous-completion path.
     {
         auto coro = []() -> IAsyncOperation<int32_t> {
-            co_return co_await wil::make_ready(7);
+            co_return co_await wil::already_complete(7);
         };
         REQUIRE(coro().get() == 7);
     }
 
     // A Completed handler on an already-completed operation fires immediately.
     {
-        auto op = wil::make_ready(5);
+        auto op = wil::already_complete(5);
         int32_t observed = 0;
         AsyncStatus observed_status = AsyncStatus::Started;
         op.Completed([&](IAsyncOperation<int32_t> const& sender, AsyncStatus status) {
@@ -962,27 +962,27 @@ TEST_CASE("CppWinRTTests::MakeReady", "[cppwinrt]")
 
     // Assigning Completed twice is illegal, matching the coroutine promise.
     {
-        auto op = wil::make_ready(1);
+        auto op = wil::already_complete(1);
         op.Completed([](auto&&, auto&&) {});
         REQUIRE_THROWS_AS(op.Completed([](auto&&, auto&&) {}), hresult_illegal_delegate_assignment);
     }
 
     // Action variant carries no result.
     {
-        IAsyncAction action = wil::make_ready();
+        IAsyncAction action = wil::already_complete();
         REQUIRE(action.Status() == AsyncStatus::Completed);
         action.get();
     }
 
     // A non-trivial result type round-trips.
     {
-        auto op = wil::make_ready(hstring{L"ready"});
+        auto op = wil::already_complete(hstring{L"ready"});
         REQUIRE(op.get() == L"ready");
     }
 
     // Failed action: Error status, GetResults/get throw the carried HRESULT.
     {
-        IAsyncAction action = wil::make_failed(E_ACCESSDENIED);
+        IAsyncAction action = wil::already_failed(E_ACCESSDENIED);
         REQUIRE(action.Status() == AsyncStatus::Error);
         REQUIRE(action.ErrorCode() == E_ACCESSDENIED);
         REQUIRE_THROWS_AS(action.get(), hresult_access_denied);
@@ -990,7 +990,7 @@ TEST_CASE("CppWinRTTests::MakeReady", "[cppwinrt]")
 
     // Failed operation: GetResults throws the carried HRESULT.
     {
-        auto op = wil::make_failed<int32_t>(E_INVALIDARG);
+        auto op = wil::already_failed<int32_t>(E_INVALIDARG);
         REQUIRE(op.Status() == AsyncStatus::Error);
         REQUIRE_THROWS_AS(op.GetResults(), hresult_invalid_argument);
     }
