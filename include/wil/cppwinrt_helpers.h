@@ -569,8 +569,7 @@ namespace details
 
         winrt::Windows::Foundation::AsyncStatus Status() const noexcept
         {
-            return (m_error < 0) ? winrt::Windows::Foundation::AsyncStatus::Error
-                                 : winrt::Windows::Foundation::AsyncStatus::Completed;
+            return (m_error < 0) ? winrt::Windows::Foundation::AsyncStatus::Error : winrt::Windows::Foundation::AsyncStatus::Completed;
         }
 
         winrt::hresult ErrorCode() const noexcept
@@ -612,16 +611,11 @@ namespace details
     }
 
     template <typename TResult>
-    struct ready_async_operation :
-        ready_async_base<
-            ready_async_operation<TResult>,
-            winrt::Windows::Foundation::IAsyncOperation<TResult>,
-            winrt::Windows::Foundation::AsyncOperationCompletedHandler<TResult>>
+    struct ready_async_operation
+        : ready_async_base<ready_async_operation<TResult>, winrt::Windows::Foundation::IAsyncOperation<TResult>, winrt::Windows::Foundation::AsyncOperationCompletedHandler<TResult>>
     {
-        using base = ready_async_base<
-            ready_async_operation<TResult>,
-            winrt::Windows::Foundation::IAsyncOperation<TResult>,
-            winrt::Windows::Foundation::AsyncOperationCompletedHandler<TResult>>;
+        using base =
+            ready_async_base<ready_async_operation<TResult>, winrt::Windows::Foundation::IAsyncOperation<TResult>, winrt::Windows::Foundation::AsyncOperationCompletedHandler<TResult>>;
 
         explicit ready_async_operation(TResult value) : m_result(std::move(value))
         {
@@ -641,16 +635,11 @@ namespace details
         TResult m_result{ready_empty_result<TResult>()};
     };
 
-    struct ready_async_action :
-        ready_async_base<
-            ready_async_action,
-            winrt::Windows::Foundation::IAsyncAction,
-            winrt::Windows::Foundation::AsyncActionCompletedHandler>
+    struct ready_async_action
+        : ready_async_base<ready_async_action, winrt::Windows::Foundation::IAsyncAction, winrt::Windows::Foundation::AsyncActionCompletedHandler>
     {
-        using base = ready_async_base<
-            ready_async_action,
-            winrt::Windows::Foundation::IAsyncAction,
-            winrt::Windows::Foundation::AsyncActionCompletedHandler>;
+        using base =
+            ready_async_base<ready_async_action, winrt::Windows::Foundation::IAsyncAction, winrt::Windows::Foundation::AsyncActionCompletedHandler>;
 
         ready_async_action() = default;
 
