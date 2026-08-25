@@ -877,6 +877,52 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
         }
         REQUIRE(count == vector_like{}.Size());
     }
+
+    // Block-boundary edge cases. For int32 the prefetch block is 128, so exercise exactly one and
+    // exactly two full blocks: the "full block implies maybe-more" rule must fetch the trailing
+    // empty block and terminate cleanly -- no infinite loop, no dropped or duplicated element.
+    for (int32_t total : {1, 127, 128, 129, 256, 257})
+    {
+        std::vector<int32_t> expected;
+        for (int32_t i = 0; i < total; ++i)
+        {
+            expected.push_back(i);
+        }
+
+        // Indexed path.
+        auto vec = winrt::single_threaded_vector<int32_t>(std::vector<int32_t>(expected));
+        std::vector<int32_t> observed;
+        for (auto&& value : wil::batched_range(vec))
+        {
+            observed.push_back(value);
+        }
+        REQUIRE(observed == expected); // exact count and in-order, so no skip/dup across seams
+
+        // Iterable-only path exercises the same boundary through IIterator::GetMany.
+        IIterable<int32_t> iterable = winrt::single_threaded_vector<int32_t>(std::vector<int32_t>(expected));
+        observed.clear();
+        for (auto&& value : wil::batched_range(iterable))
+        {
+            observed.push_back(value);
+        }
+        REQUIRE(observed == expected);
+    }
+
+    // Batching an iterator already advanced past its start yields only the remainder, matching
+    // to_vector's "current position and everything after it" contract (no re-anchor to index 0).
+    {
+        auto vec = winrt::single_threaded_vector<int32_t>({10, 20, 30, 40});
+        auto it = vec.First();
+        REQUIRE(it.Current() == 10);
+        it.MoveNext(); // now positioned at 20
+
+        std::vector<int32_t> observed;
+        for (auto&& value : wil::batched_range(it))
+        {
+            observed.push_back(value);
+        }
+        REQUIRE(observed == std::vector<int32_t>({20, 30, 40}));
+    }
 }
 
 TEST_CASE("CppWinRTTests::MakeReady", "[cppwinrt]")
