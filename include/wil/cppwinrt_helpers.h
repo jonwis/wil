@@ -593,6 +593,24 @@ namespace details
         bool m_completed_assigned{false};
     };
 
+    // Result storage initializer for the error path, which never reads the value (GetResults throws
+    // first). For projected WinRT object types (IInspectable/IUnknown-derived) a null handle avoids
+    // default-activating the runtimeclass; other types (scalars, WinRT structs, hstring) get a cheap
+    // value-init. Mirrors wil::details::empty<T>, redefined here because that lives under the
+    // Collections guard while this block only requires Windows.Foundation.
+    template <typename T>
+    T ready_empty_result() noexcept
+    {
+        if constexpr (std::is_base_of_v<winrt::Windows::Foundation::IUnknown, T>)
+        {
+            return nullptr;
+        }
+        else
+        {
+            return T{};
+        }
+    }
+
     template <typename TResult>
     struct ready_async_operation :
         ready_async_base<
@@ -620,7 +638,7 @@ namespace details
         }
 
     private:
-        TResult m_result{};
+        TResult m_result{ready_empty_result<TResult>()};
     };
 
     struct ready_async_action :

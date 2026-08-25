@@ -994,4 +994,13 @@ TEST_CASE("CppWinRTTests::MakeReady", "[cppwinrt]")
         REQUIRE(op.Status() == AsyncStatus::Error);
         REQUIRE_THROWS_AS(op.GetResults(), hresult_invalid_argument);
     }
+
+    // Failed operation whose result is a projected runtimeclass with no default constructor: the
+    // result storage must be null-initialized (Uri{nullptr}), never activated. A plain value-init
+    // here would fail to compile, and for default-activatable classes would needlessly activate.
+    {
+        auto op = wil::already_failed<winrt::Windows::Foundation::Uri>(E_FAIL);
+        REQUIRE(op.Status() == AsyncStatus::Error);
+        REQUIRE_THROWS(op.GetResults());
+    }
 }
