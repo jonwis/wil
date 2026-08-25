@@ -791,7 +791,7 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
         auto vec = winrt::single_threaded_vector<int32_t>(std::vector<int32_t>(expected));
 
         std::vector<int32_t> observed;
-        for (auto&& value : wil::batched(vec))
+        for (auto&& value : wil::batched_range(vec))
         {
             observed.push_back(value);
         }
@@ -799,7 +799,7 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
 
         // The read-only view goes through the same indexed path.
         observed.clear();
-        for (auto&& value : wil::batched(vec.GetView()))
+        for (auto&& value : wil::batched_range(vec.GetView()))
         {
             observed.push_back(value);
         }
@@ -810,7 +810,7 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
     {
         auto vec = winrt::single_threaded_vector<int32_t>(std::vector<int32_t>(129, 7));
         uint32_t count = 0;
-        for (auto&& value : wil::batched(vec))
+        for (auto&& value : wil::batched_range(vec))
         {
             REQUIRE(value == 7);
             ++count;
@@ -822,7 +822,7 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
     {
         auto vec = winrt::single_threaded_vector<int32_t>();
         uint32_t count = 0;
-        for (auto&& value : wil::batched(vec))
+        for (auto&& value : wil::batched_range(vec))
         {
             (void)value;
             ++count;
@@ -836,7 +836,7 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
         IIterable<winrt::hstring> iterable = winrt::single_threaded_vector<winrt::hstring>(std::vector<winrt::hstring>(expected));
 
         std::vector<winrt::hstring> observed;
-        for (auto&& value : wil::batched(iterable))
+        for (auto&& value : wil::batched_range(iterable))
         {
             observed.push_back(value);
         }
@@ -847,7 +847,7 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
     {
         auto vec = winrt::single_threaded_vector<int32_t>({1, 2, 3, 4, 5});
         std::vector<int32_t> observed;
-        for (auto&& value : wil::batched(vec.First()))
+        for (auto&& value : wil::batched_range(vec.First()))
         {
             observed.push_back(value);
         }
@@ -859,7 +859,7 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
         std::map<winrt::hstring, winrt::hstring> src{{L"kittens", L"fluffy"}, {L"puppies", L"cute"}};
         auto map = winrt::single_threaded_map<winrt::hstring, winrt::hstring>(std::map<winrt::hstring, winrt::hstring>(src));
         uint32_t count = 0;
-        for (auto&& pair : wil::batched(map))
+        for (auto&& pair : wil::batched_range(map))
         {
             REQUIRE(pair.Value() == src.at(pair.Key()));
             ++count;
@@ -870,7 +870,7 @@ TEST_CASE("CppWinRTTests::BatchedRangeAdapter", "[cppwinrt]")
     // Non-WinRT indexed shape works too, matching to_vector's duck typing.
     {
         uint32_t count = 0;
-        for (auto&& value : wil::batched(vector_like{}))
+        for (auto&& value : wil::batched_range(vector_like{}))
         {
             REQUIRE(value == vector_like{}.GetAt(0));
             ++count;

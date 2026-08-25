@@ -403,9 +403,9 @@ namespace details
     };
 
     template <typename Source>
-    struct batched_range
+    struct batched_view
     {
-        explicit batched_range(Source source) : m_source(std::move(source))
+        explicit batched_view(Source source) : m_source(std::move(source))
         {
         }
 
@@ -490,35 +490,35 @@ collection the per-element crossings are the dominant cost, so batching them cut
 roughly one crossing per block.
 @code
 winrt::IVector<winrt::hstring> collection = GetCollection();
-for (winrt::hstring const& item : wil::batched(collection))
+for (winrt::hstring const& item : wil::batched_range(collection))
 {
     // use item
 }
 @endcode
 Works for IVector<T>, IVectorView<T>, IIterable<T>, IIterator<T>, and any type or interface that
-C++/WinRT projects those interfaces for (PropertySet, IMap<K,V>, etc.). Indexed collections
-(those exposing GetAt) prefetch blocks with GetMany(index, ...) while preserving the component's
-end-of-range behavior; iterable-only collections buffer through IIterator::GetMany.
+C++/WinRT projects those interfaces for (PropertySet, IMap<K,V>, etc.). Indexed collections (those
+exposing GetAt) prefetch blocks with GetMany(index, ...); iterable-only collections buffer through
+IIterator::GetMany. Either way the block prefetch stops once GetMany returns a short block.
 
 The traversal is single-pass and buffering: a yielded element outlives the step that produced it,
 matching the observable behavior of wil::to_vector(collection). The returned range and its
 iterators keep the collection alive for the duration of the loop.
 */
 template <typename TSrc>
-auto batched(TSrc src)
+auto batched_range(TSrc src)
 {
     if constexpr (details::is_winrt_vector_like<TSrc>::value)
     {
-        return details::batched_range<details::batched_indexed_source<TSrc>>{{std::move(src), 0}};
+        return details::batched_view<details::batched_indexed_source<TSrc>>{{std::move(src), 0}};
     }
     else if constexpr (details::is_winrt_iterator_like<TSrc>::value)
     {
-        return details::batched_range<details::batched_iterator_source<TSrc>>{{std::move(src)}};
+        return details::batched_view<details::batched_iterator_source<TSrc>>{{std::move(src)}};
     }
     else
     {
         using Iterator = decltype(src.First());
-        return details::batched_range<details::batched_iterator_source<Iterator>>{{src.First()}};
+        return details::batched_view<details::batched_iterator_source<Iterator>>{{src.First()}};
     }
 }
 } // namespace wil
